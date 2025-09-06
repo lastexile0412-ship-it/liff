@@ -4,7 +4,7 @@ import FallbackQR from "./components/FallbackQR.jsx";
 import LiveQRScanner from "./components/LiveQRScanner.jsx";
 
 // TODO: 換成你的 Cloudflare Workers API 網址
-const API = "https://你的-worker.workers.dev";
+const API = "https://voucher-api.lastexile0412.workers.dev";
 
 // 直送 API：用序號領券
 async function claimBySerialAPI(serial, lineUserId) {
