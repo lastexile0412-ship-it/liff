@@ -1,3 +1,20 @@
+const [scanResult, setScanResult] = useState("");
+const [manual, setManual] = useState("");
+
+// 取代原本的 scan 按鈕 handler
+const scan = async () => {
+  try {
+    // 先檢查 API 是否可用
+    if (!liff.isApiAvailable || !liff.isApiAvailable("scanCodeV2")) {
+      alert("此裝置或目前設定不支援掃碼。請確認：1) LIFF 的 Scan QR 已開啟；2) LINE App 為最新版；3) 已授權相機。");
+      return;
+    }
+    const res = await liff.scanCodeV2();
+    setScanResult(res?.value || "");
+  } catch (e) {
+    alert("掃碼失敗（請確認在 LINE App 內開啟，且已授權相機）。");
+  }
+};
 import { useEffect, useState } from "react";
 import liff from "@line/liff";
 
