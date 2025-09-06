@@ -7,7 +7,7 @@ import LiveQRScanner from "./components/LiveQRScanner.jsx";
 const LIFF_LINK = "https://liff.line.me/2008067145-eY14D1Dq";
 
 // === 必改：你的 Cloudflare Workers API 網址 ===
-const API = "https://你的-worker.workers.dev";
+const API = "https://voucher-api.lastexile0412.workers.dev";
 
 // 呼叫後端：用序號領券
 async function claimBySerialAPI(serial, lineUserId) {
