@@ -3,10 +3,13 @@ import liff from "@line/liff";
 import FallbackQR from "./components/FallbackQR.jsx";
 import LiveQRScanner from "./components/LiveQRScanner.jsx";
 
-// TODO: 換成你的 Cloudflare Workers API 網址
-const API = "https://voucher-api.lastexile0412.workers.dev";
+// === 必改：你的 LIFF 深連結（用你的 LIFF ID） ===
+const LIFF_LINK = "https://liff.line.me/2008067145-eY14D1Dq";
 
-// 直送 API：用序號領券
+// === 必改：你的 Cloudflare Workers API 網址 ===
+const API = "https://你的-worker.workers.dev";
+
+// 呼叫後端：用序號領券
 async function claimBySerialAPI(serial, lineUserId) {
   const r = await fetch(`${API}/api/v1/coupons/claim`, {
     method: "POST",
@@ -25,8 +28,22 @@ export default function App() {
   const [scanResult, setScanResult] = useState("");
   const [manualSerial, setManualSerial] = useState("");
   const [showLiveScanner, setShowLiveScanner] = useState(false);
+  const [notInLine, setNotInLine] = useState(false);
 
   useEffect(() => {
+    // 先處理「不是用 LIFF 深連結打開」的情況：在 LINE 內則自動導回 LIFF 深連結
+    const ua = navigator.userAgent?.toLowerCase?.() || "";
+    const isLineInApp = ua.includes("line"); // in-app browser
+    const isDeepLink = location.href.startsWith("https://liff.line.me/");
+    if (isLineInApp && !isDeepLink) {
+      location.replace(LIFF_LINK + location.search);
+      return; // 讓瀏覽器跳轉，不要往下跑 liff.init
+    }
+    if (!isLineInApp) {
+      setNotInLine(true); // 顯示提示：請用 LINE 開啟
+    }
+
+    // 到這裡就是在 LIFF 深連結頁，開始初始化
     (async () => {
       try {
         await liff.init({ liffId: import.meta.env.VITE_LIFF_ID });
@@ -42,7 +59,7 @@ export default function App() {
     })();
   }, []);
 
-  // 原生掃碼，失敗就切到「即時相機掃碼」
+  // 1) 原生掃碼：能用就用，失敗則改成自建即時掃碼
   const scan = async () => {
     try {
       const inClient = liff.isInClient();
@@ -61,12 +78,11 @@ export default function App() {
       }
     } catch (e) {
       console.warn("scan error:", e);
-      // 無論是不可用或發生例外，改用自建即時掃碼
-      setShowLiveScanner(true);
+      setShowLiveScanner(true); // 切到自建即時掃碼
     }
   };
 
-  // 手動輸入序號→領券
+  // 2) 手動輸入序號→領券
   const claimByManual = async () => {
     const serial = manualSerial.trim();
     if (!serial) return alert("請先輸入序號");
@@ -79,6 +95,24 @@ export default function App() {
       alert("領券失敗：" + e.message);
     }
   };
+
+  // 若使用者不是用 LINE 開啟，給一個引導畫面
+  if (notInLine && !ready) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center p-6 text-center">
+        <h1 className="text-xl font-bold mb-2">請在 LINE 中開啟</h1>
+        <p className="text-gray-600 mb-4">
+          目前偵測到不是在 LINE App 內。若要使用掃碼與領券功能，請改用 LINE 開啟。
+        </p>
+        <a
+          href={LIFF_LINK + location.search}
+          className="px-4 py-2 rounded bg-green-600 text-white"
+        >
+          在 LINE 中開啟
+        </a>
+      </div>
+    );
+  }
 
   if (!ready) return <div className="p-6">啟動中…</div>;
 
@@ -101,7 +135,7 @@ export default function App() {
         </div>
       )}
 
-      {/* 1) 原生掃碼（能用就用） */}
+      {/* 原生掃碼（優先） */}
       <button
         className="px-4 py-2 bg-black text-white rounded w-full sm:w-auto"
         onClick={scan}
@@ -109,7 +143,7 @@ export default function App() {
         掃碼（scanCodeV2） → 直接領券
       </button>
 
-      {/* 2) 立即開啟：自建「即時相機掃碼」 */}
+      {/* 即時相機掃碼（自建，不靠 LIFF API） */}
       <button
         className="px-4 py-2 bg-emerald-600 text-white rounded w-full sm:w-auto"
         onClick={() => setShowLiveScanner(true)}
@@ -117,7 +151,7 @@ export default function App() {
         即時掃碼（相機）
       </button>
 
-      {/* 3) 備用：拍照辨識 QR（相片輸入） */}
+      {/* 拍照辨識（備用） */}
       <FallbackQR
         onResult={async (value) => {
           if (!value) return;
@@ -134,7 +168,7 @@ export default function App() {
         }}
       />
 
-      {/* 4) 手動輸入序號 */}
+      {/* 手動輸入序號 */}
       <div className="space-y-2">
         <label className="block text-sm text-gray-600">或手動輸入序號：</label>
         <div className="flex gap-2">
