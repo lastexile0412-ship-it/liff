@@ -2,11 +2,11 @@ import { useEffect, useMemo, useState } from 'react';
 import liff from '@line/liff';
 import { createClient } from '@supabase/supabase-js';
 
-const LIFF_ID = '你的 LIFF ID'; // e.g. "2008067145-xxxxxxx"
+const LIFF_ID = '2008067145-eY14D1Dq'; // e.g. "2008067145-xxxxxxx"
 const TOKEN_EXCHANGE_URL = '/token-exchange'; // 部署在同一個 Cloudflare Pages
 
 // 你的 Supabase 專案 URL（跟 functions 用的一致）：
-const SUPABASE_URL = 'https://<your-project-ref>.supabase.co';
+const SUPABASE_URL = 'hhttps://qczgbxfffqcdhctutdhq.supabase.co';
 
 // NOTE: 這裡不放 anon key。因為我們用自簽的 RLS JWT 當 Bearer。
 function makeSupabaseWithBearer(jwt) {
