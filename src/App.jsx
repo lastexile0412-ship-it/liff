@@ -1,244 +1,235 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { supabase } from './supabaseClient';
+import { useEffect, useMemo, useState } from 'react';
+import liff from '@line/liff';
+import { createClient } from '@supabase/supabase-js';
 
-const LIFF_ID = import.meta.env.VITE_LIFF_ID || 'YOUR-LIFF-ID';
+const LIFF_ID = '你的 LIFF ID'; // e.g. "2008067145-xxxxxxx"
+const TOKEN_EXCHANGE_URL = '/token-exchange'; // 部署在同一個 Cloudflare Pages
 
-function useQuery() {
-  return useMemo(() => {
-    const p = new URLSearchParams(location.search);
-    return {
-      mode: p.get('mode') || 'claim',
-      code: p.get('code') || '',
-    };
-  }, []);
+// 你的 Supabase 專案 URL（跟 functions 用的一致）：
+const SUPABASE_URL = 'https://<your-project-ref>.supabase.co';
+
+// NOTE: 這裡不放 anon key。因為我們用自簽的 RLS JWT 當 Bearer。
+function makeSupabaseWithBearer(jwt) {
+  return createClient(SUPABASE_URL, 'anon-key-not-used', {
+    global: {
+      headers: { Authorization: `Bearer ${jwt}` },
+    },
+  });
 }
 
 export default function App() {
-  const { mode, code } = useQuery();
-  const [ready, setReady] = useState(false);
   const [profile, setProfile] = useState(null);
-  const [serial, setSerial] = useState('');
-  const [scanErr, setScanErr] = useState('');
-  const [log, setLog] = useState([]);
-  const [recommender, setRecommender] = useState(''); // 推薦手機
-  const [statusFilter, setStatusFilter] = useState(null);
-  const [daysToExpire, setDaysToExpire] = useState(null);
-  const [list, setList] = useState([]);
+  const [jwt, setJwt] = useState('');
+  const [sb, setSb] = useState(null);
+  const [loading, setLoading] = useState(true);
 
-  const addLog = (m) => setLog((s) => [String(m), ...s]);
+  // 清單
+  const [coupons, setCoupons] = useState([]);
+
+  // 手動輸入
+  const [manualSerial, setManualSerial] = useState('');
+  const [refPhone, setRefPhone] = useState('');
 
   useEffect(() => {
     (async () => {
-      await liff.init({ liffId: LIFF_ID });
-      if (!liff.isLoggedIn()) liff.login();
-      const prof = await liff.getProfile();
-      setProfile(prof);
-      setReady(true);
+      try {
+        await liff.init({ liffId: LIFF_ID });
+        if (!liff.isLoggedIn()) {
+          liff.login();
+          return;
+        }
+
+        const idToken = liff.getIDToken();
+        const u = await liff.getProfile();
+
+        // 向後端交換 Supabase RLS 用 JWT
+        const res = await fetch(TOKEN_EXCHANGE_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            idToken,
+            displayName: u.displayName,
+            pictureUrl: u.pictureUrl,
+            email: null,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error || 'token-exchange-failed');
+
+        setProfile(u);
+        setJwt(data.token);
+        const client = makeSupabaseWithBearer(data.token);
+        setSb(client);
+
+        // 讀自己的券清單（v_my_coupons）
+        const { data: rows, error } = await client
+          .from('v_my_coupons')
+          .select('*')
+          .order('expires_at', { ascending: true });
+
+        if (error) throw error;
+        setCoupons(rows || []);
+      } catch (e) {
+        alert('初始化失敗：' + String(e));
+      } finally {
+        setLoading(false);
+      }
     })();
   }, []);
 
-  const scan = async () => {
-    setScanErr('');
+  async function reloadList(client) {
+    const c = client || sb;
+    if (!c) return;
+    const { data: rows } = await c
+      .from('v_my_coupons')
+      .select('*')
+      .order('expires_at', { ascending: true });
+    setCoupons(rows || []);
+  }
+
+  async function handleScanAndClaim() {
     try {
-      // 掃碼
-      const r = await liff.scanCodeV2();
-      const text = r?.value || '';
-      setSerial(text);
-      addLog(`掃到：${text}`);
+      // 使用 scanCodeV2
+      const result = await liff.scanCodeV2();
+      const serial = result?.value?.trim();
+      if (!serial) return;
+
+      await claim(serial, refPhone);
+      await reloadList();
     } catch (e) {
-      setScanErr('此裝置/目前設定不支援掃碼或被拒權限');
+      alert('掃碼失敗：' + String(e));
     }
-  };
+  }
 
-  // 領券
-  const claim = async (useInput=false) => {
-    try {
-      const prof = profile || (await liff.getProfile());
-      const useSerial = useInput ? serial.trim() : serial.trim();
-      if (!useSerial) return alert('請先輸入或掃碼序號');
+  async function claim(serial, phone) {
+    if (!sb) return;
+    // 呼叫 RPC：claim_coupon
+    const { data, error } = await sb.rpc('claim_coupon', {
+      p_serial: serial,
+      p_referrer_phone: phone || null,
+    });
+    if (error) throw error;
 
-      const { data, error } = await supabase.rpc('claim_coupon_by_serial', {
-        p_serial: useSerial,
-        p_line_user_id: prof.userId,
-        p_display_name: prof.displayName,
-        p_picture_url: prof.pictureUrl || null,
-        p_referrer_phone: recommender || null
-      });
-      if (error) throw error;
-      if (!data?.ok) return alert('領券失敗：' + (data?.reason || 'unknown'));
-      alert('領券成功！序號：' + useSerial);
-    } catch (e) {
-      alert('領券失敗：' + e.message);
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row?.ok) {
+      if (row?.message === 'ALREADY_CLAIMED')
+        alert('這張券已被領取');
+      else if (row?.message === 'NOT_FOUND')
+        alert('查無此序號');
+      else
+        alert('領券失敗：' + row?.message);
+    } else {
+      alert('領券成功！');
     }
-  };
+  }
 
-  // 核銷
-  const redeem = async () => {
-    try {
-      if (!code) return alert('缺少 ?code=商家代碼');
-      const useSerial = serial.trim();
-      if (!useSerial) return alert('請先輸入或掃碼序號');
-
-      const { data, error } = await supabase.rpc('redeem_coupon_by_serial', {
-        p_serial: useSerial,
-        p_merchant_code: code,
-        p_tx_amount: 0
-      });
-      if (error) throw error;
-      if (!data?.ok) return alert('核銷失敗：' + (data?.reason || 'unknown'));
-      alert('核銷成功！序號：' + useSerial);
-    } catch (e) {
-      alert('核銷失敗：' + e.message);
-    }
-  };
-
-  // 綁定商家 LINE
-  const bindMerchant = async () => {
-    try {
-      if (!code) return alert('缺少 ?code=商家代碼');
-      const prof = profile || (await liff.getProfile());
-      const { data, error } = await supabase.rpc('bind_merchant_line_user', {
-        p_merchant_code: code,
-        p_line_user_id: prof.userId
-      });
-      if (error) throw error;
-      if (!data?.ok) return alert('綁定失敗：' + (data?.reason || 'unknown'));
-      alert('綁定成功！之後通知會推播到此 LINE 帳號。');
-    } catch (e) {
-      alert('綁定失敗：' + e.message);
-    }
-  };
-
-  // 商家清單
-  const loadList = async () => {
-    try {
-      const prof = profile || (await liff.getProfile());
-      const { data, error } = await supabase.rpc('list_coupons_for_merchant', {
-        p_merchant_code: code || null,
-        p_line_user_id: prof.userId,
-        p_status_filter: statusFilter,
-        p_days_to_expire: daysToExpire ? Number(daysToExpire) : null,
-        p_limit: 200,
-        p_offset: 0
-      });
-      if (error) throw error;
-      setList(data || []);
-    } catch (e) {
-      alert('載入失敗：' + e.message);
-    }
-  };
-
-  useEffect(() => {
-    if (!ready) return;
-    if (mode === 'dashboard') loadList();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready]);
-
-  if (!ready) return <div style={{padding:16}}>初始化中…</div>;
+  if (loading) return <div style={{ padding: 16 }}>載入中…</div>;
 
   return (
-    <div style={{ padding: 16, fontFamily: 'system-ui, sans-serif' }}>
-      <h2>LIFF 票券系統（{mode}）</h2>
-      <div style={{marginBottom:8}}>嗨，{profile?.displayName}</div>
+    <div style={{ padding: 16, fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, Noto Sans, sans-serif' }}>
+      <h2>LIFF 權益卡</h2>
 
-      {(mode==='claim' || mode==='redeem') && (
-        <>
-          <div style={{ display: 'flex', gap: 8, margin:'12px 0' }}>
-            <button onClick={scan}>掃碼（scanCodeV2）</button>
-            <input
-              placeholder="或手動輸入序號"
-              value={serial}
-              onChange={e=>setSerial(e.target.value)}
-              style={{ flex:1 }}
+      {profile && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+          {profile.pictureUrl && (
+            <img
+              src={profile.pictureUrl}
+              alt="avatar"
+              width={56}
+              height={56}
+              style={{ borderRadius: '50%' }}
             />
+          )}
+          <div>
+            <div>{profile.displayName}</div>
+            <small style={{ color: '#666' }}>已登入 LINE</small>
           </div>
-          {scanErr && <div style={{color:'tomato'}}>{scanErr}</div>}
-
-          {mode==='claim' && (
-            <>
-              <div style={{margin:'8px 0'}}>
-                <input
-                  placeholder="推薦手機（B）可留空"
-                  value={recommender}
-                  onChange={e=>setRecommender(e.target.value)}
-                  style={{ width:'100%' }}
-                />
-              </div>
-              <button onClick={()=>claim(true)} style={{background:'#222',color:'#fff',padding:'8px 12px'}}>領券</button>
-            </>
-          )}
-          {mode==='redeem' && (
-            <div>
-              <div style={{margin:'4px 0', color:'#666'}}>商家代碼：{code || '(未提供)'}</div>
-              <button onClick={redeem} style={{background:'#0a7',color:'#fff',padding:'8px 12px'}}>核銷</button>
-            </div>
-          )}
-
-          <details style={{marginTop:16}}>
-            <summary>Debug</summary>
-            <pre>{JSON.stringify(profile,null,2)}</pre>
-            <div>{log.map((x,i)=><div key={i}>{x}</div>)}</div>
-          </details>
-        </>
-      )}
-
-      {mode==='bind' && (
-        <div>
-          <div style={{margin:'6px 0'}}>商家代碼：{code || '(未提供)'}</div>
-          <button onClick={bindMerchant} style={{background:'#06c',color:'#fff',padding:'8px 12px'}}>綁定到此商家</button>
         </div>
       )}
 
-      {mode==='dashboard' && (
-        <div>
-          <div style={{marginBottom:8}}>商家代碼（可空）：{code || '(使用綁定的商家)'}</div>
-          <div style={{display:'flex', gap:8, marginBottom:8}}>
-            <select value={statusFilter || ''} onChange={e=>setStatusFilter(e.target.value || null)}>
-              <option value="">全部狀態</option>
-              <option value="issued">未上架</option>
-              <option value="transferred">已領券</option>
-              <option value="redeemed">已核銷</option>
-            </select>
-            <input
-              type="number"
-              placeholder="N 天內到期"
-              value={daysToExpire || ''}
-              onChange={e=>setDaysToExpire(e.target.value || null)}
-              style={{width:120}}
-            />
-            <button onClick={loadList}>重新整理</button>
-          </div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+        <button onClick={handleScanAndClaim} style={btn()}>掃碼領券</button>
+      </div>
 
-          <table width="100%" cellPadding="6" style={{borderCollapse:'collapse', fontSize:14}}>
-            <thead>
-              <tr style={{background:'#f5f5f5'}}>
-                <th align="left">序號</th>
-                <th align="left">活動</th>
-                <th align="left">面額</th>
-                <th align="left">狀態</th>
-                <th align="left">到期</th>
-              </tr>
-            </thead>
-            <tbody>
-              {list.map((r,i)=>{
-                const color = r.status==='redeemed' ? '#0a7' : r.status==='transferred' ? '#06c' : '#777';
-                const danger = r.expires_at && new Date(r.expires_at) <= new Date(Date.now()+7*86400000);
-                return (
-                  <tr key={i} style={{borderTop:'1px solid #eee'}}>
-                    <td>{r.serial}</td>
-                    <td>{r.campaign_name}</td>
-                    <td>{Math.round((r.face_value||0)/100)} 元</td>
-                    <td style={{color}}>{r.status}</td>
-                    <td style={{color: danger?'tomato':undefined}}>
-                      {r.expires_at ? new Date(r.expires_at).toISOString().slice(0,10) : '-'}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+      <div style={{ border: '1px solid #eee', padding: 12, borderRadius: 8, marginBottom: 16 }}>
+        <div style={{ marginBottom: 8, fontWeight: 600 }}>或手動輸入序號 / 推薦手機（B 店）</div>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+          <input
+            placeholder="輸入券序號"
+            value={manualSerial}
+            onChange={(e) => setManualSerial(e.target.value)}
+            style={input()}
+          />
+          <input
+            placeholder="推薦人手機（選填）"
+            value={refPhone}
+            onChange={(e) => setRefPhone(e.target.value)}
+            style={input()}
+          />
+          <button
+            style={btn()}
+            onClick={async () => {
+              if (!manualSerial) return alert('請輸入序號');
+              await claim(manualSerial.trim(), refPhone.trim() || null);
+              setManualSerial('');
+              await reloadList();
+            }}
+          >
+            領券
+          </button>
+        </div>
+      </div>
+
+      <h3 style={{ marginTop: 0 }}>我的券</h3>
+      {(!coupons || coupons.length === 0) ? (
+        <div style={{ color: '#777' }}>尚無券</div>
+      ) : (
+        <div style={{ display: 'grid', gap: 12 }}>
+          {coupons.map((c, i) => (
+            <div key={i} style={card()}>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <div style={{ fontWeight: 700 }}>{c.campaign_name}</div>
+                <div style={{ color: '#06c', fontWeight: 700 }}>NT$ {c.face_value}</div>
+              </div>
+              <div style={{ color: '#444', marginTop: 4 }}>{c.product_name || c.benefit_desc || '—'}</div>
+              <div style={{ marginTop: 8, fontSize: 12, color: '#666' }}>
+                發行店：{c.merchant_a_name}　{c.merchant_a_phone}　{c.merchant_a_address}
+              </div>
+              <div style={{ marginTop: 4, fontSize: 12, color: '#666' }}>
+                序號：{c.serial}　狀態：{c.status}　到期：{c.expires_at ? new Date(c.expires_at).toLocaleDateString() : '—'}
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>
   );
+}
+
+function btn() {
+  return {
+    padding: '10px 14px',
+    borderRadius: 8,
+    border: '1px solid #ddd',
+    background: '#111',
+    color: '#fff',
+    cursor: 'pointer',
+  };
+}
+function input() {
+  return {
+    flex: 1,
+    padding: '10px 12px',
+    borderRadius: 8,
+    border: '1px solid #ddd',
+  };
+}
+function card() {
+  return {
+    padding: 12,
+    borderRadius: 12,
+    border: '1px solid #eee',
+    background: '#fff',
+    boxShadow: '0 1px 2px rgba(0,0,0,.04)',
+  };
 }
